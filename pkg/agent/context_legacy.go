@@ -66,6 +66,7 @@ func (m *legacyContextManager) Clear(_ context.Context, sessionKey string) error
 	if agent == nil || agent.Sessions == nil {
 		return fmt.Errorf("sessions not initialized")
 	}
+	m.al.releaseSessionMedia(sessionKey)
 	agent.Sessions.SetHistory(sessionKey, []providers.Message{})
 	agent.Sessions.SetSummary(sessionKey, "")
 	return agent.Sessions.Save(sessionKey)
@@ -155,6 +156,7 @@ func (m *legacyContextManager) forceCompression(sessionKey string) (compressionR
 
 	agent.Sessions.SetHistory(sessionKey, keptHistory)
 	agent.Sessions.Save(sessionKey)
+	m.al.releaseDroppedMedia(history, keptHistory)
 
 	logger.WarnCF("agent", "Forced compression executed", map[string]any{
 		"session_key":  sessionKey,
@@ -245,6 +247,7 @@ func (m *legacyContextManager) summarizeSession(agent *AgentInstance, sessionKey
 		agent.Sessions.SetSummary(sessionKey, finalSummary)
 		agent.Sessions.TruncateHistory(sessionKey, keepCount)
 		agent.Sessions.Save(sessionKey)
+		m.al.releaseDroppedMedia(history, agent.Sessions.GetHistory(sessionKey))
 		m.al.emitEvent(
 			EventKindSessionSummarize,
 			m.al.newTurnEventScope(agent.ID, sessionKey, nil).meta(0, "summarizeSession", "turn.session.summarize"),

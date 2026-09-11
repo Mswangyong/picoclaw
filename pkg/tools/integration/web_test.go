@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
@@ -337,6 +338,20 @@ func TestWebTool_WebFetch_NoTruncationNoticeWhenFitsInLimit(t *testing.T) {
 
 	if truncated, _ := resultMap["truncated"].(bool); truncated {
 		t.Errorf("expected truncated=false for content within limit")
+	}
+}
+
+func TestTruncateUTF8Bytes(t *testing.T) {
+	// "你好" is 6 bytes (3 each). Cutting at 4 bytes must not split a rune.
+	got := truncateUTF8Bytes("你好世界", 4)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated output is not valid UTF-8: %q", got)
+	}
+	if got != "你" {
+		t.Fatalf("truncateUTF8Bytes = %q, want 你", got)
+	}
+	if truncateUTF8Bytes("abc", 10) != "abc" {
+		t.Fatal("short strings should be unchanged")
 	}
 }
 

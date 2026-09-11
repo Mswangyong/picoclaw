@@ -107,8 +107,9 @@ func ResolveCandidatesWithLookup(
 // Behavior:
 //   - Candidates in cooldown are skipped (logged as skipped attempt).
 //   - context.Canceled aborts immediately (user abort, no fallback).
-//   - Non-retriable errors (format) abort immediately.
-//   - Retriable errors trigger fallback to next candidate.
+//   - Non-retriable errors (format, context overflow) abort immediately.
+//   - Auth failures do not retry the same provider unless IdentityKey differs.
+//   - Other retriable errors trigger fallback to next candidate.
 //   - Success marks provider as good (resets cooldown).
 //   - If all fail, returns aggregate error with all attempts.
 func (fc *FallbackChain) Execute(
@@ -123,11 +124,26 @@ func (fc *FallbackChain) Execute(
 	result := &FallbackResult{
 		Attempts: make([]FallbackAttempt, 0, len(candidates)),
 	}
+	var authFailures []FallbackCandidate
 
 	for i, candidate := range candidates {
 		// Check context before each attempt.
 		if ctx.Err() == context.Canceled {
 			return nil, context.Canceled
+		}
+
+		if blockedByAuthFailure(candidate, authFailures) {
+			result.Attempts = append(result.Attempts, FallbackAttempt{
+				Provider: candidate.Provider,
+				Model:    candidate.Model,
+				Skipped:  true,
+				Reason:   FailoverAuth,
+				Error: fmt.Errorf(
+					"%s skipped after auth failure on shared credentials",
+					candidate.StableKey(),
+				),
+			})
+			continue
 		}
 
 		// Check cooldown per stable candidate identity, not just provider/model.
@@ -230,6 +246,9 @@ func (fc *FallbackChain) Execute(
 
 		// Retriable error: mark failure and continue to next candidate.
 		fc.cooldown.MarkFailure(cooldownKey, failErr.Reason)
+		if failErr.Reason == FailoverAuth {
+			authFailures = append(authFailures, candidate)
+		}
 		result.Attempts = append(result.Attempts, FallbackAttempt{
 			Provider: candidate.Provider,
 			Model:    candidate.Model,
@@ -263,10 +282,25 @@ func (fc *FallbackChain) ExecuteImage(
 	result := &FallbackResult{
 		Attempts: make([]FallbackAttempt, 0, len(candidates)),
 	}
+	var authFailures []FallbackCandidate
 
 	for i, candidate := range candidates {
 		if ctx.Err() == context.Canceled {
 			return nil, context.Canceled
+		}
+
+		if blockedByAuthFailure(candidate, authFailures) {
+			result.Attempts = append(result.Attempts, FallbackAttempt{
+				Provider: candidate.Provider,
+				Model:    candidate.Model,
+				Skipped:  true,
+				Reason:   FailoverAuth,
+				Error: fmt.Errorf(
+					"%s skipped after auth failure on shared credentials",
+					candidate.StableKey(),
+				),
+			})
+			continue
 		}
 
 		// Enforce per-candidate rate limit before calling the provider.
@@ -337,6 +371,10 @@ func (fc *FallbackChain) ExecuteImage(
 		}
 
 		// Any other error: record and try next.
+		failErr := ClassifyError(err, candidate.Provider, candidate.Model)
+		if failErr != nil && failErr.Reason == FailoverAuth {
+			authFailures = append(authFailures, candidate)
+		}
 		result.Attempts = append(result.Attempts, FallbackAttempt{
 			Provider: candidate.Provider,
 			Model:    candidate.Model,
@@ -369,4 +407,29 @@ func (e *FallbackExhaustedError) Error() string {
 		}
 	}
 	return sb.String()
+}
+
+// sharesAuthCredentials reports whether two candidates likely use the same
+// credentials. Different providers are treated as distinct. On the same
+// provider, a different non-empty IdentityKey (e.g. a second API key) is
+// treated as distinct; otherwise auth failure is not retried on that vendor.
+func sharesAuthCredentials(failed, next FallbackCandidate) bool {
+	if !strings.EqualFold(strings.TrimSpace(failed.Provider), strings.TrimSpace(next.Provider)) {
+		return false
+	}
+	a := strings.TrimSpace(failed.IdentityKey)
+	b := strings.TrimSpace(next.IdentityKey)
+	if a != "" && b != "" && a != b {
+		return false
+	}
+	return true
+}
+
+func blockedByAuthFailure(candidate FallbackCandidate, failures []FallbackCandidate) bool {
+	for _, failed := range failures {
+		if sharesAuthCredentials(failed, candidate) {
+			return true
+		}
+	}
+	return false
 }

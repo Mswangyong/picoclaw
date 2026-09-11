@@ -77,6 +77,29 @@ func TestReleaseAll(t *testing.T) {
 	}
 }
 
+func TestFileMediaStore_Release(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileMediaStore()
+	path := createTempFile(t, dir, "one.jpg")
+
+	ref, err := store.Store(path, MediaMeta{Source: "test"}, "scope1")
+	if err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+	if err := store.Release(ref); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file should be deleted after Release, stat err=%v", err)
+	}
+	if _, err := store.Resolve(ref); err == nil {
+		t.Fatal("Resolve should fail after Release")
+	}
+	if err := store.Release("media://missing"); err != nil {
+		t.Fatalf("Release missing ref: %v", err)
+	}
+}
+
 func TestReleaseAllForgetOnlyKeepsFile(t *testing.T) {
 	dir := t.TempDir()
 	store := NewFileMediaStore()

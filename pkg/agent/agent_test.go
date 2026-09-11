@@ -4370,6 +4370,77 @@ func TestResolveMediaRefs_ResolvesToBase64(t *testing.T) {
 	}
 }
 
+func TestReleaseInboundMediaIfUnreferenced(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "in.bin")
+	if err := os.WriteFile(path, []byte("blob"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := store.Store(path, media.MediaMeta{Source: "telegram"}, "scope-in")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{Workspace: t.TempDir(), ModelName: "test-model"},
+		},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al.SetMediaStore(store)
+
+	al.releaseInboundMediaIfUnreferenced(bus.InboundMessage{
+		SessionKey: "session-empty",
+		Media:      []string{ref},
+	})
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("unreferenced inbound media should be deleted, stat err=%v", err)
+	}
+}
+
+func TestReleaseInboundMediaKeepsHistoryRefs(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keep.bin")
+	if err := os.WriteFile(path, []byte("blob"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := store.Store(path, media.MediaMeta{Source: "telegram"}, "scope-keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{Workspace: t.TempDir(), ModelName: "test-model"},
+		},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al.SetMediaStore(store)
+
+	sessionKey := "session-keep"
+	agent := al.registry.GetDefaultAgent()
+	agent.Sessions.SetHistory(sessionKey, []providers.Message{
+		{Role: "user", Content: "photo", Media: []string{ref}},
+	})
+
+	al.releaseInboundMediaIfUnreferenced(bus.InboundMessage{
+		SessionKey: sessionKey,
+		Media:      []string{ref},
+	})
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("history-referenced media should be kept: %v", err)
+	}
+
+	if err := al.contextManager.Clear(context.Background(), sessionKey); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cleared session media should be deleted, stat err=%v", err)
+	}
+}
+
 func TestResolveMediaRefs_SkipsOversizedFile(t *testing.T) {
 	store := media.NewFileMediaStore()
 	dir := t.TempDir()

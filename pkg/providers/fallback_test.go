@@ -152,6 +152,70 @@ func TestFallback_NonRetriableError(t *testing.T) {
 	}
 }
 
+func TestFallback_AuthSkipsSameProvider(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("openai", "gpt-3.5"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	var called []string
+	run := func(_ context.Context, provider, model string) (*LLMResponse, error) {
+		called = append(called, provider+"/"+model)
+		if provider == "openai" {
+			return nil, errors.New("401 unauthorized")
+		}
+		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Provider != "anthropic" {
+		t.Fatalf("provider = %q, want anthropic", result.Provider)
+	}
+	if len(called) != 2 {
+		t.Fatalf("called = %v, want openai/gpt-4 then anthropic/claude", called)
+	}
+	if called[0] != "openai/gpt-4" || called[1] != "anthropic/claude" {
+		t.Fatalf("called = %v", called)
+	}
+}
+
+func TestFallback_AuthRetriesDifferentIdentityKey(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		{Provider: "zhipu", Model: "glm-4.7", IdentityKey: "model_name:glm-4.7"},
+		{Provider: "zhipu", Model: "glm-4.7", IdentityKey: "model_name:glm-4.7__key_1"},
+	}
+
+	var keys []string
+	run := func(_ context.Context, provider, model string) (*LLMResponse, error) {
+		keys = append(keys, provider+"/"+model)
+		if len(keys) == 1 {
+			return nil, errors.New("401 unauthorized")
+		}
+		return &LLMResponse{Content: "from-second-key", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response.Content != "from-second-key" {
+		t.Fatalf("content = %q", result.Response.Content)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("keys tried = %v, want both identities", keys)
+	}
+}
+
 func TestFallback_CooldownSkip(t *testing.T) {
 	now := time.Now()
 	ct, _ := newTestTracker(now)

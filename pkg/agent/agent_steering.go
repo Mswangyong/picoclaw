@@ -14,6 +14,7 @@ func (al *AgentLoop) processMessageSync(ctx context.Context, msg bus.InboundMess
 		defer al.channelManager.InvokeTypingStop(msg.Channel, msg.ChatID)
 	}
 
+	defer al.releaseInboundMediaIfUnreferenced(msg)
 	response, err := al.processMessage(ctx, msg)
 	al.publishResponseOrError(ctx, msg.Channel, msg.ChatID, msg.SessionKey, response, err)
 }

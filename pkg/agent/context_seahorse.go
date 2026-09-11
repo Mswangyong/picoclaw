@@ -19,6 +19,7 @@ import (
 type seahorseContextManager struct {
 	engine   *seahorse.Engine
 	sessions session.SessionStore // for startup bootstrap
+	al       *AgentLoop
 }
 
 // newSeahorseContextManager creates a seahorse-backed ContextManager.
@@ -46,6 +47,7 @@ func newSeahorseContextManager(_ json.RawMessage, al *AgentLoop) (ContextManager
 	mgr := &seahorseContextManager{
 		engine:   engine,
 		sessions: agent.Sessions,
+		al:       al,
 	}
 
 	// Register seahorse tools with the agent's tool registry
@@ -156,6 +158,9 @@ func (m *seahorseContextManager) Ingest(ctx context.Context, req *IngestRequest)
 
 // Clear removes all stored context for a session (seahorse DB + JSONL).
 func (m *seahorseContextManager) Clear(ctx context.Context, sessionKey string) error {
+	if m.al != nil {
+		m.al.releaseSessionMedia(sessionKey)
+	}
 	if err := m.engine.ClearSession(ctx, sessionKey); err != nil {
 		return err
 	}
