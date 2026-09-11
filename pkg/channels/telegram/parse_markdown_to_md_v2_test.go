@@ -2,6 +2,7 @@ package telegram
 
 import (
 	_ "embed"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -56,6 +57,16 @@ func Test_markdownToTelegramMarkdownV2(t *testing.T) {
 			input:    "<Market Capitalization>",
 			expected: "\\<Market Capitalization\\>",
 		},
+		{
+			name:     "nested inline entities",
+			input:    "*bold _italic_ still*",
+			expected: "*bold _italic_ still*",
+		},
+		{
+			name:     "sequential entities",
+			input:    "*a* ~b~ `c`",
+			expected: "*a* ~b~ `c`",
+		},
 	}
 
 	for _, tc := range cases {
@@ -65,4 +76,15 @@ func Test_markdownToTelegramMarkdownV2(t *testing.T) {
 			require.EqualValues(t, tc.expected, actual)
 		})
 	}
+}
+
+func Test_markdownToTelegramMarkdownV2_ManySequentialEntities(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 2000; i++ {
+		b.WriteString("*x*")
+		b.WriteByte(' ')
+	}
+	out := markdownToTelegramMarkdownV2(b.String())
+	require.Contains(t, out, "*x*")
+	require.Greater(t, len(out), 1000)
 }

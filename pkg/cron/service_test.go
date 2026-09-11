@@ -20,7 +20,7 @@ func TestSaveStore_FilePermissions(t *testing.T) {
 
 	cs := NewCronService(storePath, nil)
 
-	_, err := cs.AddJob("test", CronSchedule{Kind: "every", EveryMS: int64Ptr(60000)}, "hello", "cli", "direct")
+	_, err := cs.AddJob("test", CronSchedule{Kind: "every", EveryMS: int64Ptr(60000)}, "hello", "cli", "direct", "")
 	if err != nil {
 		t.Fatalf("AddJob failed: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestCronService_CRUD(t *testing.T) {
 
 	// Test AddJob
 	at := time.Now().Add(time.Hour).UnixMilli()
-	job, err := cs.AddJob("Task1", CronSchedule{Kind: "at", AtMS: &at}, "msg", "ch", "to")
+	job, err := cs.AddJob("Task1", CronSchedule{Kind: "at", AtMS: &at}, "msg", "ch", "to", "")
 	if err != nil || job.ID == "" {
 		t.Fatalf("AddJob failed: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestCronService_ExecutionFlow(t *testing.T) {
 
 	// Add a job then runs 100ms from now
 	target := time.Now().Add(100 * time.Millisecond).UnixMilli()
-	job, _ := cs.AddJob("FastJob", CronSchedule{Kind: "at", AtMS: &target}, "", "", "")
+	job, _ := cs.AddJob("FastJob", CronSchedule{Kind: "at", AtMS: &target}, "", "", "", "")
 
 	// Check for job execution with a timeout
 	success := false
@@ -167,7 +167,7 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 	// write a job and persist
 	cs1 := NewCronService(tmpFile, nil)
 	at := int64(2000000000000)
-	cs1.AddJob("PersistMe", CronSchedule{Kind: "at", AtMS: &at}, "payload", "ch1", "")
+	cs1.AddJob("PersistMe", CronSchedule{Kind: "at", AtMS: &at}, "payload", "ch1", "", "")
 
 	// check file exists
 	if _, err := os.Stat(tmpFile); os.IsNotExist(err) {
@@ -213,7 +213,7 @@ func TestCronService_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			for j := range iterations {
 				at := time.Now().Add(time.Hour).UnixMilli()
-				cs.AddJob(fmt.Sprintf("Job-%d-%d", id, j), CronSchedule{Kind: "at", AtMS: &at}, "", "", "")
+				cs.AddJob(fmt.Sprintf("Job-%d-%d", id, j), CronSchedule{Kind: "at", AtMS: &at}, "", "", "", "")
 				time.Sleep(100 * time.Microsecond)
 			}
 		}(i)
@@ -234,4 +234,102 @@ func TestCronService_ConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestCronService_ListJobsReturnsCopy(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	at := time.Now().Add(time.Hour).UnixMilli()
+	if _, err := cs.AddJob("KeepMe", CronSchedule{Kind: "at", AtMS: &at}, "msg", "ch", "to", ""); err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+
+	jobs := cs.ListJobs(true)
+	if len(jobs) != 1 {
+		t.Fatalf("ListJobs len = %d, want 1", len(jobs))
+	}
+	jobs[0].Name = "Mutated"
+
+	stored := cs.ListJobs(true)
+	if stored[0].Name != "KeepMe" {
+		t.Fatalf("internal store mutated via ListJobs result, got %q", stored[0].Name)
+	}
+}
+
+func TestCronService_AddJobPersistsCommand(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	at := time.Now().Add(time.Hour).UnixMilli()
+	job, err := cs.AddJob("Disk", CronSchedule{Kind: "at", AtMS: &at}, "check disk", "cli", "direct", "df -h")
+	if err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+	if job.Payload.Command != "df -h" {
+		t.Fatalf("command = %q, want df -h", job.Payload.Command)
+	}
+
+	cs2 := NewCronService(path, nil)
+	jobs := cs2.ListJobs(true)
+	if len(jobs) != 1 || jobs[0].Payload.Command != "df -h" {
+		t.Fatalf("persisted command missing, jobs=%+v", jobs)
+	}
+}
+
+func TestCronService_UpdateJobRecomputesNextRun(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	at := time.Now().Add(time.Hour).UnixMilli()
+	job, err := cs.AddJob("Later", CronSchedule{Kind: "at", AtMS: &at}, "msg", "ch", "to", "")
+	if err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+
+	soon := time.Now().Add(2 * time.Minute).UnixMilli()
+	job.Schedule = CronSchedule{Kind: "at", AtMS: &soon}
+	if err := cs.UpdateJob(job); err != nil {
+		t.Fatalf("UpdateJob failed: %v", err)
+	}
+
+	updated := cs.ListJobs(true)[0]
+	if updated.State.NextRunAtMS == nil || *updated.State.NextRunAtMS != soon {
+		t.Fatalf("next run not recomputed, got %+v", updated.State.NextRunAtMS)
+	}
+}
+
+func TestCronService_ComputeNextRunTimezone(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
+	utcNext := cs.computeNextRun(&CronSchedule{Kind: "cron", Expr: "0 9 * * *", TZ: "UTC"}, now)
+	if utcNext == nil {
+		t.Fatal("expected UTC next run")
+	}
+	if got := time.UnixMilli(*utcNext).UTC(); got.Hour() != 9 || got.Day() != 2 {
+		t.Fatalf("UTC next run = %v, want 2024-01-02 09:00 UTC", got)
+	}
+
+	nyNext := cs.computeNextRun(&CronSchedule{Kind: "cron", Expr: "0 9 * * *", TZ: "America/New_York"}, now)
+	if nyNext == nil {
+		t.Fatal("expected America/New_York next run")
+	}
+	if *nyNext == *utcNext {
+		t.Fatal("timezone should change next run instant")
+	}
+	nyTime := time.UnixMilli(*nyNext).In(mustLoadLocation(t, "America/New_York"))
+	if nyTime.Hour() != 9 {
+		t.Fatalf("NY next run hour = %d, want 9 in America/New_York", nyTime.Hour())
+	}
+}
+
+func mustLoadLocation(t *testing.T, name string) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		t.Fatalf("LoadLocation(%q): %v", name, err)
+	}
+	return loc
 }

@@ -27,6 +27,7 @@ type WeixinChannel struct {
 	// contextTokens stores the last context_token per user (from_user_id → context_token).
 	// This is required by the iLink API to associate replies with the right chat session.
 	contextTokens     sync.Map
+	persistMu         sync.Mutex
 	typingMu          sync.Mutex
 	typingCache       map[string]typingTicketCacheEntry
 	pauseMu           sync.Mutex
@@ -124,7 +125,12 @@ func (c *WeixinChannel) restoreContextTokens() {
 }
 
 // persistContextTokens saves all in-memory context tokens to disk.
+// Snapshot and write are serialized so concurrent inbound messages cannot
+// overwrite a newer map with a stale Range snapshot.
 func (c *WeixinChannel) persistContextTokens() {
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+
 	tokens := make(map[string]string)
 	c.contextTokens.Range(func(k, v any) bool {
 		if userID, ok := k.(string); ok {

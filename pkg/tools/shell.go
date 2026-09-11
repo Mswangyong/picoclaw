@@ -490,12 +490,14 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	var stdoutReader io.ReadCloser
 	var stderrReader io.ReadCloser
 	var stdinWriter io.WriteCloser
+	var tty *os.File
 
 	if ptyEnabled {
-		ptmx, tty, err := pty.Open()
+		ptmx, slave, err := pty.Open()
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("failed to create PTY: %v", err))
 		}
+		tty = slave
 
 		cmd.Stdin = tty
 		cmd.Stdout = tty
@@ -527,10 +529,17 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	// Background sessions use the same startup path so isolation stays consistent
 	// with synchronous exec runs.
 	if err := isolation.Start(cmd); err != nil {
-		if session.ptyMaster != nil {
-			session.ptyMaster.Close()
+		if tty != nil {
+			_ = tty.Close()
 		}
+		session.Close()
 		return ErrorResult(fmt.Sprintf("failed to start command: %v", err))
+	}
+
+	// Parent must drop the PTY slave so the master sees EOF after the child exits.
+	if tty != nil {
+		_ = tty.Close()
+		tty = nil
 	}
 
 	session.PID = cmd.Process.Pid
@@ -542,36 +551,33 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	// Note: On Linux, closing ptyMaster doesn't interrupt blocking Read() calls,
 	// so we need cmd.Wait() in a separate goroutine to detect process exit.
 	if session.PTY && session.ptyMaster != nil {
+		session.mu.Lock()
+		ptmx := session.ptyMaster
+		session.mu.Unlock()
+
 		go func() {
-			cmd.Wait() // Wait for process to exit
-			session.mu.Lock()
+			_ = cmd.Wait()
+			exitCode := -1
 			if cmd.ProcessState != nil {
-				session.ExitCode = cmd.ProcessState.ExitCode()
+				exitCode = cmd.ProcessState.ExitCode()
 			}
-			session.Status = "done"
-			session.mu.Unlock()
+			session.markDone(exitCode)
+			session.Close()
 		}()
 
 		go func() {
+			if ptmx == nil {
+				return
+			}
 			buf := make([]byte, 4096)
 			for {
-				n, err := session.ptyMaster.Read(buf)
+				n, err := ptmx.Read(buf)
 				if n > 0 {
 					raw := string(buf[:n])
 					if mode := detectPtyKeyMode(raw); mode != PtyKeyModeNotFound && mode != session.GetPtyKeyMode() {
 						session.SetPtyKeyMode(mode)
 					}
-
-					session.mu.Lock()
-					if session.outputBuffer.Len() >= maxOutputBufferSize {
-						if !session.outputTruncated {
-							session.outputBuffer.WriteString(outputTruncateMarker)
-							session.outputTruncated = true
-						}
-					} else {
-						session.outputBuffer.Write(buf[:n])
-					}
-					session.mu.Unlock()
+					session.appendOutput(buf[:n])
 				}
 				if err != nil {
 					break
@@ -579,64 +585,39 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 			}
 		}()
 	} else {
-		// Non-PTY mode: single goroutine reads pipes.
-		// When Read() returns EOF (pipe closed), we break.
-		// When process exits, OS closes pipe write end → Read() returns EOF → we exit.
-		go func() {
+		// Drain stdout and stderr concurrently. Sequential reads deadlock when the
+		// child fills the unread pipe (~64KB) while the parent is still blocked on
+		// the other stream.
+		var wg sync.WaitGroup
+		readPipe := func(r io.Reader) {
+			defer wg.Done()
 			buf := make([]byte, 4096)
-
-			// Read stdout
 			for {
-				n, err := stdoutReader.Read(buf)
+				n, err := r.Read(buf)
 				if n > 0 {
-					session.mu.Lock()
-					if session.outputBuffer.Len() >= maxOutputBufferSize {
-						if !session.outputTruncated {
-							session.outputBuffer.WriteString(outputTruncateMarker)
-							session.outputTruncated = true
-						}
-					} else {
-						session.outputBuffer.Write(buf[:n])
-					}
-					session.mu.Unlock()
+					session.appendOutput(buf[:n])
 				}
 				if err != nil {
-					break
+					return
 				}
 			}
+		}
 
-			// Read stderr
-			for {
-				n, err := stderrReader.Read(buf)
-				if n > 0 {
-					session.mu.Lock()
-					if session.outputBuffer.Len() >= maxOutputBufferSize {
-						if !session.outputTruncated {
-							session.outputBuffer.WriteString(outputTruncateMarker)
-							session.outputTruncated = true
-						}
-					} else {
-						session.outputBuffer.Write(buf[:n])
-					}
-					session.mu.Unlock()
-				}
-				if err != nil {
-					break
-				}
-			}
+		wg.Add(2)
+		go readPipe(stdoutReader)
+		go readPipe(stderrReader)
 
-			// All pipes closed, get exit status
+		go func() {
+			wg.Wait()
 			if stdinWriter != nil {
-				stdinWriter.Close()
+				_ = stdinWriter.Close()
 			}
-			cmd.Wait()
-
-			session.mu.Lock()
+			_ = cmd.Wait()
+			exitCode := -1
 			if cmd.ProcessState != nil {
-				session.ExitCode = cmd.ProcessState.ExitCode()
+				exitCode = cmd.ProcessState.ExitCode()
 			}
-			session.Status = "done"
-			session.mu.Unlock()
+			session.markDone(exitCode)
 		}()
 	}
 
@@ -1060,7 +1041,7 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 
 		cwdPath, err := filepath.Abs(cwd)
 		if err != nil {
-			return ""
+			return "Command blocked by safety guard (unable to resolve working directory)"
 		}
 
 		// Web URL schemes whose path components (starting with //) should be exempt
@@ -1096,7 +1077,7 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 
 			p, err := filepath.Abs(raw)
 			if err != nil {
-				continue
+				return "Command blocked by safety guard (unable to resolve path)"
 			}
 
 			if safePaths[p] {
@@ -1108,7 +1089,7 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 
 			rel, err := filepath.Rel(cwdPath, p)
 			if err != nil {
-				continue
+				return "Command blocked by safety guard (path outside working dir)"
 			}
 
 			if strings.HasPrefix(rel, "..") {

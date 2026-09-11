@@ -218,19 +218,10 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		message,
 		channel,
 		chatID,
+		command,
 	)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("Error adding job: %v", err))
-	}
-
-	// Apply optional payload fields and persist in a single UpdateJob call
-	needsUpdate := false
-	if command != "" {
-		job.Payload.Command = command
-		needsUpdate = true
-	}
-	if needsUpdate {
-		t.cronService.UpdateJob(job)
 	}
 
 	return SilentResult(fmt.Sprintf("Cron job added: %s (id: %s)", job.Name, job.ID))

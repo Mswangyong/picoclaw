@@ -152,6 +152,140 @@ func TestFallback_NonRetriableError(t *testing.T) {
 	}
 }
 
+func TestFallback_AuthSkipsSameProvider(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("openai", "gpt-3.5"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	var called []string
+	run := func(_ context.Context, provider, model string) (*LLMResponse, error) {
+		called = append(called, provider+"/"+model)
+		if provider == "openai" {
+			return nil, errors.New("401 unauthorized")
+		}
+		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Provider != "anthropic" {
+		t.Fatalf("provider = %q, want anthropic", result.Provider)
+	}
+	if len(called) != 2 {
+		t.Fatalf("called = %v, want openai/gpt-4 then anthropic/claude", called)
+	}
+	if called[0] != "openai/gpt-4" || called[1] != "anthropic/claude" {
+		t.Fatalf("called = %v", called)
+	}
+}
+
+func TestFallback_AuthRetriesDifferentIdentityKey(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		{Provider: "zhipu", Model: "glm-4.7", IdentityKey: "model_name:glm-4.7"},
+		{Provider: "zhipu", Model: "glm-4.7", IdentityKey: "model_name:glm-4.7__key_1"},
+	}
+
+	var keys []string
+	run := func(_ context.Context, provider, model string) (*LLMResponse, error) {
+		keys = append(keys, provider+"/"+model)
+		if len(keys) == 1 {
+			return nil, errors.New("401 unauthorized")
+		}
+		return &LLMResponse{Content: "from-second-key", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response.Content != "from-second-key" {
+		t.Fatalf("content = %q", result.Response.Content)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("keys tried = %v, want both identities", keys)
+	}
+}
+
+func TestFallback_BillingSkipsSameProvider(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("openai", "gpt-3.5"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	var called []string
+	run := func(_ context.Context, provider, model string) (*LLMResponse, error) {
+		called = append(called, provider+"/"+model)
+		if provider == "openai" {
+			return nil, errors.New("402 payment required")
+		}
+		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Provider != "anthropic" {
+		t.Fatalf("provider = %q, want anthropic", result.Provider)
+	}
+	if len(called) != 2 {
+		t.Fatalf("called = %v, want openai/gpt-4 then anthropic/claude", called)
+	}
+	if called[0] != "openai/gpt-4" || called[1] != "anthropic/claude" {
+		t.Fatalf("called = %v", called)
+	}
+	if len(result.Attempts) < 2 {
+		t.Fatalf("attempts = %d, want skipped gpt-3.5 recorded", len(result.Attempts))
+	}
+	if !result.Attempts[1].Skipped || result.Attempts[1].Reason != FailoverBilling {
+		t.Fatalf("second attempt = %+v, want skipped billing", result.Attempts[1])
+	}
+}
+
+func TestFallback_BillingRetriesDifferentIdentityKey(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		{Provider: "zhipu", Model: "glm-4.7", IdentityKey: "model_name:glm-4.7"},
+		{Provider: "zhipu", Model: "glm-4.7", IdentityKey: "model_name:glm-4.7__key_1"},
+	}
+
+	var keys []string
+	run := func(_ context.Context, provider, model string) (*LLMResponse, error) {
+		keys = append(keys, provider+"/"+model)
+		if len(keys) == 1 {
+			return nil, errors.New("insufficient credits")
+		}
+		return &LLMResponse{Content: "from-second-key", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response.Content != "from-second-key" {
+		t.Fatalf("content = %q", result.Response.Content)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("keys tried = %v, want both identities", keys)
+	}
+}
+
 func TestFallback_CooldownSkip(t *testing.T) {
 	now := time.Now()
 	ct, _ := newTestTracker(now)
@@ -517,6 +651,37 @@ func TestImageFallback_RetryOnOtherErrors(t *testing.T) {
 	}
 	if result.Provider != "anthropic" {
 		t.Errorf("provider = %q, want anthropic", result.Provider)
+	}
+}
+
+func TestImageFallback_BillingSkipsSameProvider(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4o"),
+		makeCandidate("openai", "gpt-4o-mini"),
+		makeCandidate("anthropic", "claude-sonnet"),
+	}
+
+	var called []string
+	run := func(_ context.Context, provider, model string) (*LLMResponse, error) {
+		called = append(called, provider+"/"+model)
+		if provider == "openai" {
+			return nil, errors.New("402 payment required")
+		}
+		return &LLMResponse{Content: "image ok", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.ExecuteImage(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Provider != "anthropic" {
+		t.Fatalf("provider = %q, want anthropic", result.Provider)
+	}
+	if len(called) != 2 {
+		t.Fatalf("called = %v, want openai then anthropic", called)
 	}
 }
 

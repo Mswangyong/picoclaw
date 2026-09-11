@@ -49,6 +49,10 @@ type MediaStore interface {
 	// ReleaseAll deletes all files registered under the given scope
 	// and removes the mapping entries. File-not-exist errors are ignored.
 	ReleaseAll(scope string) error
+
+	// Release drops a single ref and deletes the file when it is the last
+	// store-managed reference to that path. Unknown refs are ignored.
+	Release(ref string) error
 }
 
 // mediaEntry holds the path and metadata for a stored media file.
@@ -208,6 +212,35 @@ func (s *FileMediaStore) ReleaseAll(scope string) error {
 		}
 	}
 
+	return nil
+}
+
+// Release drops a single ref. Unknown refs are a no-op.
+func (s *FileMediaStore) Release(ref string) error {
+	s.mu.Lock()
+	if scope, ok := s.refToScope[ref]; ok {
+		if scopeRefs, ok := s.scopeToRefs[scope]; ok {
+			delete(scopeRefs, ref)
+			if len(scopeRefs) == 0 {
+				delete(s.scopeToRefs, scope)
+			}
+		}
+	}
+	fallbackPath := ""
+	if entry, exists := s.refs[ref]; exists {
+		fallbackPath = entry.path
+	}
+	path, shouldDelete := s.releaseRefLocked(ref, fallbackPath)
+	s.mu.Unlock()
+
+	if shouldDelete && path != "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			logger.WarnCF("media", "release: failed to remove file", map[string]any{
+				"path":  path,
+				"error": err.Error(),
+			})
+		}
+	}
 	return nil
 }
 

@@ -233,21 +233,12 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 					defer al.channelManager.InvokeTypingStop(m.Channel, m.ChatID)
 				}
 
+				if m.SessionKey == "" {
+					m.SessionKey = sessionKey
+				}
+				defer al.releaseInboundMediaIfUnreferenced(m)
 				al.runTurnWithSteering(ctx, m)
 			}(msg)
-
-			// TODO: Re-enable media cleanup after inbound media is properly consumed by the agent.
-			// Currently disabled because files are deleted before the LLM can access their content.
-			// defer func() {
-			// 	if al.mediaStore != nil && msg.MediaScope != "" {
-			// 		if releaseErr := al.mediaStore.ReleaseAll(msg.MediaScope); releaseErr != nil {
-			// 			logger.WarnCF("agent", "Failed to release media", map[string]any{
-			// 				"scope": msg.MediaScope,
-			// 				"error": releaseErr.Error(),
-			// 			})
-			// 		}
-			// 	}
-			// }()
 		}
 	}
 }

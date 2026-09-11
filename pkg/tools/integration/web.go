@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -1836,7 +1837,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 
 	truncated := len(text) > maxChars
 	if truncated {
-		text = text[:maxChars] + "\n[Content truncated due to size limit]"
+		text = truncateUTF8Bytes(text, maxChars) + "\n[Content truncated due to size limit]"
 	}
 
 	result := map[string]any{
@@ -2136,4 +2137,22 @@ func isPrivateOrRestrictedIP(ip net.IP) bool {
 	}
 
 	return false
+}
+
+// truncateUTF8Bytes cuts s to at most n bytes on a rune boundary so JSON
+// payloads never contain a split multibyte sequence.
+func truncateUTF8Bytes(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	if n <= 0 {
+		return ""
+	}
+	if utf8.ValidString(s[:n]) {
+		return s[:n]
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

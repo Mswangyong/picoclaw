@@ -63,7 +63,7 @@ func outboundMessageFinalizesTrackedToolFeedback(msg bus.OutboundMessage) bool {
 
 // writeJSON sends a JSON message to the connection with write locking.
 func (pc *picoConn) writeJSON(v any) error {
-	if pc.closed.Load() {
+	if pc == nil || pc.conn == nil || pc.closed.Load() {
 		return fmt.Errorf("connection closed")
 	}
 	pc.writeMu.Lock()
@@ -910,9 +910,13 @@ func (c *PicoChannel) handleMessageSend(pc *picoConn, msg PicoMessage) {
 		return
 	}
 
-	sessionID := msg.SessionID
-	if sessionID == "" {
-		sessionID = pc.sessionID
+	sessionID := pc.sessionID
+	if msg.SessionID != "" && msg.SessionID != pc.sessionID {
+		errMsg := newErrorWithPayload("session_mismatch", "session_id does not match this connection", map[string]any{
+			"request_id": msg.ID,
+		})
+		pc.writeJSON(errMsg)
+		return
 	}
 
 	chatID := "pico:" + sessionID

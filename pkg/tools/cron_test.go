@@ -195,6 +195,11 @@ func TestCronTool_CommandAllowedFromInternalChannel(t *testing.T) {
 	if !strings.Contains(result.ForLLM, "Cron job added") {
 		t.Errorf("expected 'Cron job added', got: %s", result.ForLLM)
 	}
+
+	jobs := tool.cronService.ListJobs(true)
+	if len(jobs) != 1 || jobs[0].Payload.Command != "df -h" {
+		t.Fatalf("expected command to be stored on the job, got %+v", jobs)
+	}
 }
 
 // TestCronTool_AddJobRequiresSessionContext verifies fail-closed when channel/chatID missing

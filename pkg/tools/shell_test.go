@@ -1471,6 +1471,60 @@ func TestShellTool_Background_ReadAfterExit(t *testing.T) {
 	require.Contains(t, readResp.Output, "world", "should contain world after sleep")
 }
 
+func TestShellTool_Background_ConcurrentStdoutStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX redirection")
+	}
+
+	tool, err := NewExecTool("", false)
+	require.NoError(t, err)
+
+	sm := NewSessionManager()
+	tool.sessionManager = sm
+
+	ctx := WithToolContext(context.Background(), "cli", "test")
+	runResult := tool.Execute(ctx, map[string]any{
+		"action":     "run",
+		"command":    "head -c 131072 /dev/urandom >&2; echo stdout-done",
+		"background": "true",
+	})
+	require.False(t, runResult.IsError, "run should succeed: %s", runResult.ForLLM)
+
+	var resp ExecResponse
+	err = json.Unmarshal([]byte(runResult.ForLLM), &resp)
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.SessionID)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		pollResult := tool.Execute(ctx, map[string]any{
+			"action":    "poll",
+			"sessionId": resp.SessionID,
+		})
+		require.False(t, pollResult.IsError, "poll should succeed: %s", pollResult.ForLLM)
+
+		var pollResp ExecResponse
+		err = json.Unmarshal([]byte(pollResult.ForLLM), &pollResp)
+		require.NoError(t, err)
+		if pollResp.Status == "done" {
+			readResult := tool.Execute(ctx, map[string]any{
+				"action":    "read",
+				"sessionId": resp.SessionID,
+			})
+			require.False(t, readResult.IsError, "read should succeed: %s", readResult.ForLLM)
+
+			var readResp ExecResponse
+			err = json.Unmarshal([]byte(readResult.ForLLM), &readResp)
+			require.NoError(t, err)
+			require.Contains(t, readResp.Output, "stdout-done")
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatal("background command deadlocked or did not finish draining stdout/stderr")
+}
+
 func TestSendKeys_CtrlC(t *testing.T) {
 	// Note: Ctrl-C as a signal requires sending SIGINT to the process group,
 	// which requires elevated privileges. Writing "\x03" to PTY passes the byte

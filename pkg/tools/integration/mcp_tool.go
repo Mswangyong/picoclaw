@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -61,7 +62,11 @@ func (t *MCPTool) SetMaxInlineTextRunes(limit int) {
 	}
 }
 
-const maxMCPInlineTextRunes = 16 * 1024
+const (
+	maxMCPInlineTextRunes = 16 * 1024
+	mcpArtifactMaxAge     = 7 * 24 * time.Hour
+	mcpArtifactMaxFiles   = 64
+)
 
 // sanitizeIdentifierComponent normalizes a string so it can be safely used
 // as part of a tool/function identifier for downstream providers.
@@ -362,7 +367,6 @@ func (t *MCPTool) persistLargeTextArtifact(text string) *ToolResult {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return t.largeTextArtifactFallback(text, err)
 	}
-	// TODO: Add lifecycle cleanup/retention for MCP artifact files.
 
 	pattern := fmt.Sprintf(
 		"%s_%s_*.txt",
@@ -383,6 +387,7 @@ func (t *MCPTool) persistLargeTextArtifact(text string) *ToolResult {
 		_ = os.Remove(path)
 		return t.largeTextArtifactFallback(text, err)
 	}
+	cleanupMCPArtifacts(dir, path, time.Now())
 
 	return &ToolResult{
 		ForLLM: fmt.Sprintf(
@@ -390,6 +395,63 @@ func (t *MCPTool) persistLargeTextArtifact(text string) *ToolResult {
 			size,
 		),
 		ArtifactTags: []string{"[file:" + path + "]"},
+	}
+}
+
+// cleanupMCPArtifacts enforces retention on workspace MCP text dumps:
+// keep the newest mcpArtifactMaxFiles files and drop anything older than
+// mcpArtifactMaxAge. keepPath is never deleted (the file just written).
+func cleanupMCPArtifacts(dir, keepPath string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	type artifactFile struct {
+		path    string
+		modTime time.Time
+	}
+	files := make([]artifactFile, 0, len(entries))
+	keepPath = filepath.Clean(keepPath)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, artifactFile{
+			path:    filepath.Join(dir, entry.Name()),
+			modTime: info.ModTime(),
+		})
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].modTime.Equal(files[j].modTime) {
+			return files[i].modTime.After(files[j].modTime)
+		}
+		return files[i].path < files[j].path
+	})
+
+	kept := 0
+	for _, f := range files {
+		path := filepath.Clean(f.path)
+		if path == keepPath {
+			kept++
+			continue
+		}
+		expired := now.Sub(f.modTime) > mcpArtifactMaxAge
+		if expired || kept >= mcpArtifactMaxFiles {
+			if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
+				logger.WarnCF("tool", "Failed to prune MCP text artifact", map[string]any{
+					"path":  f.path,
+					"error": err.Error(),
+				})
+			}
+			continue
+		}
+		kept++
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/h2non/filetype"
 
+	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -214,4 +215,75 @@ func injectPathTags(content string, tags []string) string {
 		}
 	}
 	return content
+}
+
+func collectMediaRefs(messages []providers.Message) map[string]struct{} {
+	refs := make(map[string]struct{})
+	for _, msg := range messages {
+		for _, ref := range msg.Media {
+			if strings.HasPrefix(ref, "media://") {
+				refs[ref] = struct{}{}
+			}
+		}
+	}
+	return refs
+}
+
+func (al *AgentLoop) releaseDroppedMedia(before, after []providers.Message) {
+	if al == nil || al.mediaStore == nil {
+		return
+	}
+	live := collectMediaRefs(after)
+	for ref := range collectMediaRefs(before) {
+		if _, ok := live[ref]; ok {
+			continue
+		}
+		if err := al.mediaStore.Release(ref); err != nil {
+			logger.WarnCF("agent", "Failed to release dropped media", map[string]any{
+				"ref":   ref,
+				"error": err.Error(),
+			})
+		}
+	}
+}
+
+func (al *AgentLoop) releaseSessionMedia(sessionKey string) {
+	if al == nil || al.mediaStore == nil || al.registry == nil {
+		return
+	}
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil || agent.Sessions == nil {
+		return
+	}
+	al.releaseDroppedMedia(agent.Sessions.GetHistory(sessionKey), nil)
+}
+
+// releaseInboundMediaIfUnreferenced drops inbound files that never made it
+// into session history (failed/rejected turns). Refs still present in history
+// are kept so follow-up turns can re-resolve them.
+func (al *AgentLoop) releaseInboundMediaIfUnreferenced(msg bus.InboundMessage) {
+	if al == nil || al.mediaStore == nil || len(msg.Media) == 0 {
+		return
+	}
+	live := map[string]struct{}{}
+	if msg.SessionKey != "" && al.registry != nil {
+		if agent := al.registry.GetDefaultAgent(); agent != nil && agent.Sessions != nil {
+			live = collectMediaRefs(agent.Sessions.GetHistory(msg.SessionKey))
+		}
+	}
+	for _, ref := range msg.Media {
+		if !strings.HasPrefix(ref, "media://") {
+			continue
+		}
+		if _, ok := live[ref]; ok {
+			continue
+		}
+		if err := al.mediaStore.Release(ref); err != nil {
+			logger.WarnCF("agent", "Failed to release inbound media", map[string]any{
+				"ref":   ref,
+				"scope": msg.MediaScope,
+				"error": err.Error(),
+			})
+		}
+	}
 }

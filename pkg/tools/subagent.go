@@ -169,13 +169,6 @@ func (sm *SubagentManager) runTask(
 	task *SubagentTask,
 	callback AsyncCallback,
 ) {
-	task.Status = "running"
-	task.Created = time.Now().UnixMilli()
-	// TODO(eventbus): once subagents are modeled as child turns inside
-	// pkg/agent, emit SubTurnEnd and SubTurnResultDelivered from the parent
-	// AgentLoop instead of this legacy manager.
-
-	// Check if context is already canceled before starting
 	select {
 	case <-ctx.Done():
 		sm.mu.Lock()
@@ -292,10 +285,11 @@ After completing the task, provide a clear summary of what was done.`
 }
 
 func (sm *SubagentManager) GetTask(taskID string) (*SubagentTask, bool) {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	task, ok := sm.tasks[taskID]
-	return task, ok
+	taskCopy, ok := sm.GetTaskCopy(taskID)
+	if !ok {
+		return nil, false
+	}
+	return &taskCopy, true
 }
 
 // GetTaskCopy returns a copy of the task with the given ID, taken under the
@@ -311,12 +305,10 @@ func (sm *SubagentManager) GetTaskCopy(taskID string) (SubagentTask, bool) {
 }
 
 func (sm *SubagentManager) ListTasks() []*SubagentTask {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	tasks := make([]*SubagentTask, 0, len(sm.tasks))
-	for _, task := range sm.tasks {
-		tasks = append(tasks, task)
+	copies := sm.ListTaskCopies()
+	tasks := make([]*SubagentTask, 0, len(copies))
+	for i := range copies {
+		tasks = append(tasks, &copies[i])
 	}
 	return tasks
 }
