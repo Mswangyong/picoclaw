@@ -1485,7 +1485,7 @@ func TestShellTool_Background_ConcurrentStdoutStderr(t *testing.T) {
 	ctx := WithToolContext(context.Background(), "cli", "test")
 	runResult := tool.Execute(ctx, map[string]any{
 		"action":     "run",
-		"command":    "dd if=/dev/zero bs=1024 count=128 2>/dev/null >&2; echo stdout-done",
+		"command":    "head -c 131072 /dev/urandom >&2; echo stdout-done",
 		"background": "true",
 	})
 	require.False(t, runResult.IsError, "run should succeed: %s", runResult.ForLLM)
