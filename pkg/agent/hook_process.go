@@ -398,6 +398,9 @@ func (ph *ProcessHook) send(ctx context.Context, msg processHookRPCMessage) erro
 		}
 		return nil
 	case <-ctx.Done():
+		// Keep writeMu until Write returns so a concurrent send cannot interleave
+		// JSON-RPC bytes on stdin.
+		<-done
 		return ctx.Err()
 	}
 }

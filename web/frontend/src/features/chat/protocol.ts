@@ -124,7 +124,7 @@ export function handlePicoMessage(
   message: PicoMessage,
   expectedSessionId: string,
 ) {
-  if (message.session_id && message.session_id !== expectedSessionId) {
+  if (message.session_id !== expectedSessionId) {
     return
   }
 
@@ -144,21 +144,32 @@ export function handlePicoMessage(
           ? normalizeUnixTimestamp(Number(message.timestamp))
           : Date.now()
 
-      updateChatStore((prev) => ({
-        messages: [
-          ...prev.messages,
-          {
-            id: messageId,
-            role: "assistant",
-            content,
-            kind,
-            attachments,
-            timestamp,
-          },
-        ],
-        isTyping: false,
-        ...(contextUsage ? { contextUsage } : {}),
-      }))
+      updateChatStore((prev) => {
+        const existingIndex = prev.messages.findIndex(
+          (msg) => msg.id === messageId,
+        )
+        const nextMessage: ChatMessage = {
+          id: messageId,
+          role: "assistant",
+          content,
+          kind,
+          attachments,
+          timestamp,
+        }
+
+        const messages =
+          existingIndex >= 0
+            ? prev.messages.map((msg, index) =>
+                index === existingIndex ? { ...msg, ...nextMessage } : msg,
+              )
+            : [...prev.messages, nextMessage]
+
+        return {
+          messages,
+          isTyping: false,
+          ...(contextUsage ? { contextUsage } : {}),
+        }
+      })
       break
     }
 

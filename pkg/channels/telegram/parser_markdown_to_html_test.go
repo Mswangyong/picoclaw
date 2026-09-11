@@ -46,9 +46,9 @@ func Test_markdownToTelegramHTML(t *testing.T) {
 			expected: `<a href="https://a.com/path_one">first</a> and <a href="https://b.com/path_two_x">second</a>`,
 		},
 		{
-			name:     "link label with HTML special chars is escaped",
-			input:    "[a & b](https://example.com)",
-			expected: `<a href="https://example.com">a &amp; b</a>`,
+			name:     "link URL quotes are escaped for HTML attributes",
+			input:    `[click](https://example.com/q?"a"<b>)`,
+			expected: `<a href="https://example.com/q?&quot;a&quot;&lt;b&gt;">click</a>`,
 		},
 		{
 			name:     "HTML special chars in plain text are escaped",

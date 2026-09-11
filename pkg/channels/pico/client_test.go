@@ -390,3 +390,29 @@ func TestPicoClientChannel_HandleServerMessage_IgnoresThought(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 }
+
+func TestHandleMessageSend_RejectsMismatchedSessionID(t *testing.T) {
+	mb := bus.NewMessageBus()
+	bc := &config.Channel{Type: "pico", Enabled: true}
+	ch, err := NewPicoChannel(bc, &config.PicoSettings{
+		Token: *config.NewSecureString("test-token"),
+	}, mb)
+	if err != nil {
+		t.Fatalf("NewPicoChannel() error = %v", err)
+	}
+
+	pc := &picoConn{id: "conn-1", sessionID: "sess-1"}
+	ch.handleMessageSend(pc, PicoMessage{
+		ID:        "msg-spoof",
+		SessionID: "other-session",
+		Payload: map[string]any{
+			"content": "hello from another session",
+		},
+	})
+
+	select {
+	case msg := <-mb.InboundChan():
+		t.Fatalf("expected spoofed session_id to be rejected, got %+v", msg)
+	case <-time.After(150 * time.Millisecond):
+	}
+}

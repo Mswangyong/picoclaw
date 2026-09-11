@@ -334,3 +334,25 @@ func TestSend_NonToolFeedbackFinalizerStillStartsTTS(t *testing.T) {
 		t.Fatal("expected TTS to start for finalized tracked tool feedback reply")
 	}
 }
+
+func TestShouldIgnoreDiscordAuthor(t *testing.T) {
+	self := "bot-self"
+	tests := []struct {
+		name   string
+		author *discordgo.User
+		want   bool
+	}{
+		{name: "nil author", want: true},
+		{name: "self", author: &discordgo.User{ID: self}, want: true},
+		{name: "other bot", author: &discordgo.User{ID: "other-bot", Bot: true}, want: true},
+		{name: "human", author: &discordgo.User{ID: "human-1"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldIgnoreDiscordAuthor(self, tt.author); got != tt.want {
+				t.Fatalf("shouldIgnoreDiscordAuthor() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

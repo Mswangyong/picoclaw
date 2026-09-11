@@ -41,6 +41,7 @@ type ProcessSession struct {
 	PTY             bool
 	Background      bool
 	StartTime       int64
+	CompletedAt     int64
 	ExitCode        int
 	Status          string
 	stdinWriter     io.Writer
@@ -114,6 +115,10 @@ func (s *ProcessSession) killProcess() error {
 
 	s.Status = "done"
 	s.ExitCode = -1
+	if s.CompletedAt == 0 {
+		s.CompletedAt = time.Now().Unix()
+	}
+	s.closeLocked()
 	return nil
 }
 
@@ -168,6 +173,60 @@ func (s *ProcessSession) ToSessionInfo() SessionInfo {
 	}
 }
 
+func (s *ProcessSession) appendOutput(data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.outputBuffer == nil {
+		s.outputBuffer = &bytes.Buffer{}
+	}
+	if s.outputBuffer.Len() >= maxOutputBufferSize {
+		if !s.outputTruncated {
+			s.outputBuffer.WriteString(outputTruncateMarker)
+			s.outputTruncated = true
+		}
+		return
+	}
+	s.outputBuffer.Write(data)
+}
+
+func (s *ProcessSession) markDone(exitCode int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ExitCode = exitCode
+	s.Status = "done"
+	if s.CompletedAt == 0 {
+		s.CompletedAt = time.Now().Unix()
+	}
+}
+
+func (s *ProcessSession) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeLocked()
+}
+
+func (s *ProcessSession) closeLocked() {
+	if s.ptyMaster != nil {
+		_ = s.ptyMaster.Close()
+		s.ptyMaster = nil
+	}
+	if closer, ok := s.stdinWriter.(io.Closer); ok && closer != nil {
+		_ = closer.Close()
+		s.stdinWriter = nil
+	}
+}
+
+func (s *ProcessSession) completedAtUnix() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.CompletedAt != 0 {
+		return s.CompletedAt
+	}
+	return s.StartTime
+}
+
 type SessionManager struct {
 	mu       sync.RWMutex
 	sessions map[string]*ProcessSession
@@ -190,14 +249,15 @@ func NewSessionManager() *SessionManager {
 	return sm
 }
 
-// cleanupOldSessions removes sessions that are done and older than 30 minutes
+// cleanupOldSessions removes sessions that finished more than 30 minutes ago.
 func (sm *SessionManager) cleanupOldSessions() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	cutoff := time.Now().Add(-30 * time.Minute)
+	cutoff := time.Now().Add(-30 * time.Minute).Unix()
 	for id, session := range sm.sessions {
-		if session.IsDone() && session.StartTime < cutoff.Unix() {
+		if session.IsDone() && session.completedAtUnix() < cutoff {
+			session.Close()
 			delete(sm.sessions, id)
 		}
 	}
@@ -224,7 +284,10 @@ func (sm *SessionManager) Get(sessionID string) (*ProcessSession, error) {
 func (sm *SessionManager) Remove(sessionID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	delete(sm.sessions, sessionID)
+	if session, ok := sm.sessions[sessionID]; ok {
+		session.Close()
+		delete(sm.sessions, sessionID)
+	}
 }
 
 func (sm *SessionManager) List() []SessionInfo {

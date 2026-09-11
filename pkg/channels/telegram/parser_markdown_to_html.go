@@ -43,7 +43,7 @@ func markdownToTelegramHTML(text string) string {
 
 	for i, lnk := range links.links {
 		label := escapeHTML(lnk[0])
-		url := lnk[1]
+		url := escapeHTMLAttr(lnk[1])
 		text = strings.ReplaceAll(text, fmt.Sprintf("\x00LK%d\x00", i), fmt.Sprintf(`<a href="%s">%s</a>`, url, label))
 	}
 
@@ -137,5 +137,11 @@ func escapeHTML(text string) string {
 	text = strings.ReplaceAll(text, "&", "&amp;")
 	text = strings.ReplaceAll(text, "<", "&lt;")
 	text = strings.ReplaceAll(text, ">", "&gt;")
+	return text
+}
+
+func escapeHTMLAttr(text string) string {
+	text = escapeHTML(text)
+	text = strings.ReplaceAll(text, `"`, "&quot;")
 	return text
 }

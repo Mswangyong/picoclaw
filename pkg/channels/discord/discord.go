@@ -520,12 +520,21 @@ func appendContent(content, suffix string) string {
 	return content + "\n" + suffix
 }
 
+func shouldIgnoreDiscordAuthor(selfID string, author *discordgo.User) bool {
+	if author == nil {
+		return true
+	}
+	if author.ID == selfID {
+		return true
+	}
+	return author.Bot
+}
+
 func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m == nil || m.Author == nil {
+	if m == nil || s == nil || s.State == nil || s.State.User == nil {
 		return
 	}
-
-	if m.Author.ID == s.State.User.ID {
+	if shouldIgnoreDiscordAuthor(s.State.User.ID, m.Author) {
 		return
 	}
 

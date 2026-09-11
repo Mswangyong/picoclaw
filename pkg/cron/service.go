@@ -320,6 +320,15 @@ func (cs *CronService) computeNextRun(schedule *CronSchedule, nowMS int64) *int6
 
 		// Use gronx to calculate next run time
 		now := time.UnixMilli(nowMS)
+		if schedule.TZ != "" {
+			loc, err := time.LoadLocation(schedule.TZ)
+			if err != nil {
+				log.Printf("[cron] invalid timezone '%s' for expr '%s': %v", schedule.TZ, schedule.Expr, err)
+				return nil
+			}
+			now = now.In(loc)
+		}
+
 		nextTime, err := gronx.NextTickAfter(schedule.Expr, now, false)
 		if err != nil {
 			log.Printf("[cron] failed to compute next run for expr '%s': %v", schedule.Expr, err)
@@ -358,7 +367,8 @@ func (cs *CronService) getNextWakeMS() *int64 {
 	for _, job := range cs.store.Jobs {
 		if job.Enabled && job.State.NextRunAtMS != nil {
 			if nextWake == nil || *job.State.NextRunAtMS < *nextWake {
-				nextWake = job.State.NextRunAtMS
+				v := *job.State.NextRunAtMS
+				nextWake = &v
 			}
 		}
 	}
@@ -408,7 +418,7 @@ func (cs *CronService) AddJob(
 	name string,
 	schedule CronSchedule,
 	message string,
-	channel, to string,
+	channel, to, command string,
 ) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -426,6 +436,7 @@ func (cs *CronService) AddJob(
 		Payload: CronPayload{
 			Kind:    "agent_turn",
 			Message: message,
+			Command: command,
 			Channel: channel,
 			To:      to,
 		},
@@ -453,8 +464,21 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 
 	for i := range cs.store.Jobs {
 		if cs.store.Jobs[i].ID == job.ID {
+			oldSchedule := cs.store.Jobs[i].Schedule
 			cs.store.Jobs[i] = *job
 			cs.store.Jobs[i].UpdatedAtMS = time.Now().UnixMilli()
+
+			if cs.store.Jobs[i].Enabled {
+				if !cronScheduleEqual(oldSchedule, cs.store.Jobs[i].Schedule) ||
+					cs.store.Jobs[i].State.NextRunAtMS == nil {
+					cs.store.Jobs[i].State.NextRunAtMS = cs.computeNextRun(
+						&cs.store.Jobs[i].Schedule,
+						time.Now().UnixMilli(),
+					)
+				}
+			} else {
+				cs.store.Jobs[i].State.NextRunAtMS = nil
+			}
 
 			cs.notify()
 
@@ -515,7 +539,8 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) *CronJob {
 
 			cs.notify()
 
-			return job
+			cp := *job
+			return &cp
 		}
 	}
 
@@ -527,10 +552,10 @@ func (cs *CronService) ListJobs(includeDisabled bool) []CronJob {
 	defer cs.mu.RUnlock()
 
 	if includeDisabled {
-		return cs.store.Jobs
+		return append([]CronJob(nil), cs.store.Jobs...)
 	}
 
-	var enabled []CronJob
+	enabled := make([]CronJob, 0)
 	for _, job := range cs.store.Jobs {
 		if job.Enabled {
 			enabled = append(enabled, job)
@@ -556,6 +581,23 @@ func (cs *CronService) Status() map[string]any {
 		"jobs":         len(cs.store.Jobs),
 		"nextWakeAtMS": cs.getNextWakeMS(),
 	}
+}
+
+func cronScheduleEqual(a, b CronSchedule) bool {
+	if a.Kind != b.Kind || a.Expr != b.Expr || a.TZ != b.TZ {
+		return false
+	}
+	if !int64PtrEqual(a.AtMS, b.AtMS) {
+		return false
+	}
+	return int64PtrEqual(a.EveryMS, b.EveryMS)
+}
+
+func int64PtrEqual(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func generateID() string {

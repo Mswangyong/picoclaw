@@ -129,6 +129,7 @@ Task: %s`,
 				MaxTokens:    t.maxTokens,
 				Temperature:  t.temperature,
 				Async:        true, // Async execution
+				Critical:     true, // Keep running after the parent turn finishes
 			})
 			if err != nil {
 				result = ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)

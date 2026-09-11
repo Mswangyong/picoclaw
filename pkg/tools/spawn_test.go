@@ -3,14 +3,30 @@ package tools
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
-// mockSpawner implements SubTurnSpawner for testing
-type mockSpawner struct{}
+type mockSpawner struct {
+	mu      sync.Mutex
+	lastCfg SubTurnConfig
+	started chan struct{}
+}
 
-func (m *mockSpawner) SpawnSubTurn(ctx context.Context, cfg SubTurnConfig) (*ToolResult, error) {
-	// Extract task from system prompt for response
+func (m *mockSpawner) SpawnSubTurn(_ context.Context, cfg SubTurnConfig) (*ToolResult, error) {
+	m.mu.Lock()
+	m.lastCfg = cfg
+	started := m.started
+	m.mu.Unlock()
+	if started != nil {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+	}
+
 	task := cfg.SystemPrompt
 	if strings.Contains(task, "Task: ") {
 		parts := strings.Split(task, "Task: ")
@@ -22,6 +38,12 @@ func (m *mockSpawner) SpawnSubTurn(ctx context.Context, cfg SubTurnConfig) (*Too
 		ForLLM:  "Task completed: " + task,
 		ForUser: "Task completed",
 	}, nil
+}
+
+func (m *mockSpawner) config() SubTurnConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastCfg
 }
 
 func TestSpawnTool_Execute_EmptyTask(t *testing.T) {
@@ -62,7 +84,8 @@ func TestSpawnTool_Execute_ValidTask(t *testing.T) {
 	provider := &MockLLMProvider{}
 	manager := NewSubagentManager(provider, "test-model", "/tmp/test")
 	tool := NewSpawnTool(manager)
-	tool.SetSpawner(&mockSpawner{})
+	spawner := &mockSpawner{started: make(chan struct{})}
+	tool.SetSpawner(spawner)
 
 	ctx := context.Background()
 	args := map[string]any{
@@ -79,6 +102,19 @@ func TestSpawnTool_Execute_ValidTask(t *testing.T) {
 	}
 	if !result.Async {
 		t.Error("SpawnTool should return async result")
+	}
+
+	select {
+	case <-spawner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for spawn")
+	}
+	cfg := spawner.config()
+	if !cfg.Async {
+		t.Error("spawned subturn should be async")
+	}
+	if !cfg.Critical {
+		t.Error("spawned subturn should be critical so it survives parent turn end")
 	}
 }
 

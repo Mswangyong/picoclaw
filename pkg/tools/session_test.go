@@ -2,6 +2,7 @@ package tools
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -96,4 +97,42 @@ func TestProcessSession_ToSessionInfo(t *testing.T) {
 	require.Equal(t, "running", info.Status)
 	require.Equal(t, 12345, info.PID)
 	require.Equal(t, int64(1000), info.StartedAt)
+}
+
+func TestSessionManager_CleanupUsesCompletedAt(t *testing.T) {
+	sm := NewSessionManager()
+	now := time.Now().Unix()
+
+	oldDone := &ProcessSession{
+		ID:          "old-done",
+		Status:      "done",
+		StartTime:   now - int64(2*time.Hour.Seconds()),
+		CompletedAt: now - int64(2*time.Hour.Seconds()),
+	}
+	recentlyFinished := &ProcessSession{
+		ID:          "recent-done",
+		Status:      "done",
+		StartTime:   now - int64(2*time.Hour.Seconds()),
+		CompletedAt: now - 60,
+	}
+	stillRunning := &ProcessSession{
+		ID:        "running",
+		Status:    "running",
+		StartTime: now - int64(2*time.Hour.Seconds()),
+	}
+
+	sm.Add(oldDone)
+	sm.Add(recentlyFinished)
+	sm.Add(stillRunning)
+	sm.cleanupOldSessions()
+
+	if _, err := sm.Get("old-done"); err == nil {
+		t.Fatal("expected old completed session to be cleaned up")
+	}
+	if _, err := sm.Get("recent-done"); err != nil {
+		t.Fatalf("recently finished session should be kept: %v", err)
+	}
+	if _, err := sm.Get("running"); err != nil {
+		t.Fatalf("running session should be kept: %v", err)
+	}
 }
