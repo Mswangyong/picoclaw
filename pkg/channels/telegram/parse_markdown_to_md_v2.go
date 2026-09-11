@@ -107,15 +107,63 @@ func markdownToTelegramMarkdownV2(text string) string {
 	return processText(text)
 }
 
+// maxMarkdownEntityDepth bounds nested inline formatting so a pathological
+// input cannot blow the goroutine stack. Sequential entities are handled in
+// a loop and do not consume depth.
+const maxMarkdownEntityDepth = 32
+
 // processText walks `text`, finds the leftmost / longest matching entity,
 // escapes the gap before it, processes the entity (recursing into its inner
 // content when appropriate), then continues with the remainder.
 func processText(text string) string {
+	return processTextAtDepth(text, 0)
+}
+
+func processTextAtDepth(text string, depth int) string {
 	if text == "" {
 		return ""
 	}
+	if depth > maxMarkdownEntityDepth {
+		return escapeMarkdownV2(text)
+	}
 
-	// Find the leftmost match among all entity patterns.
+	var b strings.Builder
+	remaining := text
+	for remaining != "" {
+		bestStart, bestEnd, bestPat := findLeftmostEntity(remaining)
+		if bestPat == nil {
+			b.WriteString(escapeMarkdownV2(remaining))
+			break
+		}
+
+		if bestStart > 0 {
+			b.WriteString(escapeMarkdownV2(remaining[:bestStart]))
+		}
+
+		matched := remaining[bestStart:bestEnd]
+		if verbatimEntities[bestPat.open] {
+			// Code blocks, URLs, quotes: pass through completely untouched.
+			b.WriteString(matched)
+		} else {
+			// Inline formatting (bold, italic, underline, strikethrough, spoiler):
+			// keep the delimiters and recursively process the inner content so that
+			// nested entities survive but stray specials get escaped.
+			openLen := len(bestPat.open)
+			closeLen := len(bestPat.close)
+			inner := matched[openLen : len(matched)-closeLen]
+
+			b.WriteString(bestPat.open)
+			b.WriteString(processTextAtDepth(inner, depth+1))
+			b.WriteString(bestPat.close)
+		}
+
+		remaining = remaining[bestEnd:]
+	}
+
+	return b.String()
+}
+
+func findLeftmostEntity(text string) (start, end int, pat *entityPattern) {
 	bestStart := -1
 	bestEnd := -1
 	var bestPat *entityPattern
@@ -133,42 +181,7 @@ func processText(text string) string {
 			bestPat = p
 		}
 	}
-
-	if bestPat == nil {
-		// No entity found — escape everything.
-		return escapeMarkdownV2(text)
-	}
-
-	var b strings.Builder
-
-	// Plain text before the entity.
-	if bestStart > 0 {
-		b.WriteString(escapeMarkdownV2(text[:bestStart]))
-	}
-
-	// The matched entity span.
-	matched := text[bestStart:bestEnd]
-
-	if verbatimEntities[bestPat.open] {
-		// Code blocks, URLs, quotes: pass through completely untouched.
-		b.WriteString(matched)
-	} else {
-		// Inline formatting (bold, italic, underline, strikethrough, spoiler):
-		// keep the delimiters and recursively process the inner content so that
-		// nested entities survive but stray specials get escaped.
-		openLen := len(bestPat.open)
-		closeLen := len(bestPat.close)
-		inner := matched[openLen : len(matched)-closeLen]
-
-		b.WriteString(bestPat.open)
-		b.WriteString(processText(inner))
-		b.WriteString(bestPat.close)
-	}
-
-	// Continue with the remainder of the string.
-	b.WriteString(processText(text[bestEnd:]))
-
-	return b.String()
+	return bestStart, bestEnd, bestPat
 }
 
 // escapeMarkdownV2 escapes every MarkdownV2 special character in a plain-text

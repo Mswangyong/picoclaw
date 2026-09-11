@@ -102,8 +102,9 @@ func (e *FailoverError) Unwrap() error {
 }
 
 // IsRetriable returns true if this error should trigger fallback to next candidate.
-// Format and context-overflow errors abort immediately. Auth failures are
-// retriable only onto candidates with different credentials (see FallbackChain).
+// Format and context-overflow errors abort immediately. Auth and billing
+// failures are retriable only onto candidates with different credentials
+// (see FallbackChain).
 func (e *FailoverError) IsRetriable() bool {
 	return e.Reason != FailoverFormat && e.Reason != FailoverContextOverflow
 }

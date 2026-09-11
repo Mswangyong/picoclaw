@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -317,5 +319,40 @@ func TestSelectInboundMediaItemFallsBackToRefMessage(t *testing.T) {
 	}
 	if item.Type != MessageItemTypeImage {
 		t.Fatalf("selectInboundMediaItem().Type = %d, want %d", item.Type, MessageItemTypeImage)
+	}
+}
+
+func TestPersistContextTokensConcurrentDoesNotDropUsers(t *testing.T) {
+	dir := t.TempDir()
+	ch := &WeixinChannel{
+		contextTokensPath: filepath.Join(dir, "tokens.json"),
+		typingCache:       make(map[string]typingTicketCacheEntry),
+	}
+
+	const n = 40
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			user := fmt.Sprintf("user-%d", i)
+			ch.contextTokens.Store(user, "tok-"+user)
+			ch.persistContextTokens()
+		}(i)
+	}
+	wg.Wait()
+
+	tokens, err := loadContextTokens(ch.contextTokensPath)
+	if err != nil {
+		t.Fatalf("loadContextTokens: %v", err)
+	}
+	if len(tokens) != n {
+		t.Fatalf("persisted %d tokens, want %d (lost concurrent updates)", len(tokens), n)
+	}
+	for i := 0; i < n; i++ {
+		user := fmt.Sprintf("user-%d", i)
+		if tokens[user] != "tok-"+user {
+			t.Fatalf("token[%s] = %q, want %q", user, tokens[user], "tok-"+user)
+		}
 	}
 }

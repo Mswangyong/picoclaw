@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -806,5 +807,85 @@ func TestMCPTool_Execute_WhitespaceWorkspaceDisablesArtifactPersistence(t *testi
 	}
 	if !strings.Contains(result.ForLLM, "This is a large MCP text payload") {
 		t.Fatalf("expected large text to remain inline when workspace is blank, got %q", result.ForLLM)
+	}
+}
+
+func TestCleanupMCPArtifacts_KeepsNewestUpToMaxFiles(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	total := mcpArtifactMaxFiles + 5
+	paths := make([]string, total)
+	for i := 0; i < total; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("art-%03d.txt", i))
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		mod := now.Add(-time.Duration(i) * time.Minute)
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatalf("chtimes %s: %v", path, err)
+		}
+		paths[i] = path
+	}
+
+	keep := paths[0]
+	cleanupMCPArtifacts(dir, keep, now)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != mcpArtifactMaxFiles {
+		t.Fatalf("remaining = %d, want %d", len(entries), mcpArtifactMaxFiles)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("kept newest file missing: %v", err)
+	}
+	if _, err := os.Stat(paths[len(paths)-1]); !os.IsNotExist(err) {
+		t.Fatalf("expected oldest file to be pruned, err=%v", err)
+	}
+}
+
+func TestCleanupMCPArtifacts_DeletesExpiredFiles(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	keep := filepath.Join(dir, "fresh.txt")
+	expired := filepath.Join(dir, "old.txt")
+	if err := os.WriteFile(keep, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(expired, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-mcpArtifactMaxAge - time.Hour)
+	if err := os.Chtimes(expired, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupMCPArtifacts(dir, keep, now)
+
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("fresh file missing: %v", err)
+	}
+	if _, err := os.Stat(expired); !os.IsNotExist(err) {
+		t.Fatalf("expected expired file to be pruned, err=%v", err)
+	}
+}
+
+func TestCleanupMCPArtifacts_NeverDeletesKeepPath(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	keep := filepath.Join(dir, "just-written.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-mcpArtifactMaxAge - time.Hour)
+	if err := os.Chtimes(keep, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupMCPArtifacts(dir, keep, now)
+
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("keepPath must survive even when expired: %v", err)
 	}
 }
